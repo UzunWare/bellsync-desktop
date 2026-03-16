@@ -271,6 +271,26 @@ function setupIPC() {
     }
   });
 
+  // ─── App Version ────────────────────────────────────────────────────────
+  ipcMain.handle("get-app-version", () => app.getVersion());
+
+  // ─── Updates ───────────────────────────────────────────────────────────
+  ipcMain.handle("check-for-updates", async () => {
+    if (!app.isPackaged) return { success: false, error: "Updates disabled in dev mode" };
+    try {
+      await autoUpdater.checkForUpdates();
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle("install-update", () => {
+    log.info("User triggered update install");
+    isQuitting = true;
+    autoUpdater.quitAndInstall(true, true);
+  });
+
   // ─── Log Folder ─────────────────────────────────────────────────────────
   ipcMain.handle("open-log-folder", () => {
     const logPath = log.transports.file.getFile().path;
@@ -383,19 +403,38 @@ if (!gotTheLock && !isRelaunch) {
     setupIPC();
     await syncAutoLaunch();
 
-    // ─── Auto-Update (silent, no user prompt) ─────────────────────────────
+    // ─── Auto-Update ──────────────────────────────────────────────────────
     if (app.isPackaged) {
       autoUpdater.autoDownload = true;
       autoUpdater.autoInstallOnAppQuit = true;
-      autoUpdater.on("checking-for-update", () => log.info("Checking for updates..."));
-      autoUpdater.on("update-available", (info) => log.info("Update available:", info.version));
-      autoUpdater.on("update-not-available", () => log.info("No updates available"));
-      autoUpdater.on("update-downloaded", () => {
-        log.info("Update downloaded, installing and restarting...");
-        isQuitting = true;
-        autoUpdater.quitAndInstall(true, true);
+
+      const sendUpdateStatus = (status, extra = {}) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send("update-status", { status, ...extra });
+        }
+      };
+
+      autoUpdater.on("checking-for-update", () => {
+        log.info("Checking for updates...");
+        sendUpdateStatus("checking");
       });
-      autoUpdater.on("error", (err) => log.error("Auto-update error:", err));
+      autoUpdater.on("update-available", (info) => {
+        log.info("Update available:", info.version);
+        sendUpdateStatus("available", { version: info.version });
+      });
+      autoUpdater.on("update-not-available", () => {
+        log.info("No updates available");
+        sendUpdateStatus("up-to-date");
+      });
+      autoUpdater.on("update-downloaded", (info) => {
+        log.info("Update downloaded:", info.version);
+        sendUpdateStatus("ready", { version: info.version });
+      });
+      autoUpdater.on("error", (err) => {
+        log.error("Auto-update error:", err);
+        sendUpdateStatus("error", { error: err.message });
+      });
+
       autoUpdater.checkForUpdates().catch(() => {});
       setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
     }

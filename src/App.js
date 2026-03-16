@@ -57,6 +57,13 @@ const LL = {
     openLogs: "Open Log Folder",
     openLogsDesc: "View application logs for troubleshooting",
     appVersion: "App Version",
+    checkUpdates: "Check for Updates",
+    updateChecking: "Checking…",
+    updateAvailable: "Downloading update v{v}…",
+    updateReady: "Update v{v} ready — restart to install",
+    updateUpToDate: "You're up to date!",
+    updateError: "Update check failed",
+    installUpdate: "Restart & Update",
   },
   tr: {
     appName: "BellSync", displayMode: "Ekran", adminMode: "Yönetim",
@@ -98,6 +105,13 @@ const LL = {
     openLogs: "Kayıt Klasörünü Aç",
     openLogsDesc: "Sorun giderme için uygulama kayıtlarını görüntüle",
     appVersion: "Uygulama Sürümü",
+    checkUpdates: "Güncelleme Kontrol Et",
+    updateChecking: "Kontrol ediliyor…",
+    updateAvailable: "v{v} güncelleme indiriliyor…",
+    updateReady: "v{v} güncelleme hazır — yüklemek için yeniden başlat",
+    updateUpToDate: "Güncelsiniz!",
+    updateError: "Güncelleme kontrolü başarısız",
+    installUpdate: "Yeniden Başlat ve Güncelle",
   },
 };
 
@@ -262,6 +276,8 @@ export default function App() {
   const [autoLaunch, setAutoLaunch] = useState(true);
   const [minToTray, setMinToTray] = useState(true);
   const [skipDates, setSkipDates] = useState([]);
+  const [appVersion, setAppVersion] = useState("1.0.0");
+  const [updateStatus, setUpdateStatus] = useState({ status: "idle" });
   const fileRef = useRef(null);
   const previewRef = useRef(null);
   const ringAudioRef = useRef(null);
@@ -286,6 +302,10 @@ export default function App() {
           if (typeof all.minimizeToTray === "boolean") setMinToTray(all.minimizeToTray);
           if (Array.isArray(all.skipDates)) setSkipDates(all.skipDates);
           if (Array.isArray(all.customSounds)) setCustomSounds(all.customSounds);
+          if (electron.getAppVersion) {
+            const ver = await electron.getAppVersion();
+            if (ver) setAppVersion(ver);
+          }
         } catch (e) { console.error("Failed to load settings:", e); }
       }
       setLoaded(true);
@@ -293,10 +313,14 @@ export default function App() {
 
     // Listen for silent mode changes from system tray
     let removeSilentListener;
+    let removeUpdateListener;
     if (electron) {
       removeSilentListener = electron.onSilentModeChanged((val) => setSilent(val));
+      if (electron.onUpdateStatus) {
+        removeUpdateListener = electron.onUpdateStatus((data) => setUpdateStatus(data));
+      }
     }
-    return () => { if (removeSilentListener) removeSilentListener(); };
+    return () => { if (removeSilentListener) removeSilentListener(); if (removeUpdateListener) removeUpdateListener(); };
   }, []);
 
   // ─── Auto-save settings when they change ─────────────────────────────────
@@ -826,7 +850,40 @@ export default function App() {
 
                       <div style={{ padding: 18, borderRadius: 12, background: "rgba(20,28,40,0.6)", border: "1px solid #1a2333" }}>
                         <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", marginBottom: 6 }}>{t.appVersion}</div>
-                        <div style={{ fontFamily: "'DM Mono'", fontSize: 13, color: "#fbbf24" }}>v1.0.0</div>
+                        <div style={{ fontFamily: "'DM Mono'", fontSize: 13, color: "#fbbf24", marginBottom: 10 }}>v{appVersion}</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <button
+                            disabled={updateStatus.status === "checking" || updateStatus.status === "available"}
+                            onClick={async () => {
+                              setUpdateStatus({ status: "checking" });
+                              const r = await electron.checkForUpdates();
+                              if (!r.success && r.error) setUpdateStatus({ status: "error", error: r.error });
+                            }}
+                            style={btn("rgba(251,191,36,0.08)", "rgba(251,191,36,0.2)", "#fbbf24", { padding: "8px 18px", fontSize: 13, opacity: (updateStatus.status === "checking" || updateStatus.status === "available") ? 0.5 : 1 })}
+                          >
+                            {updateStatus.status === "checking" ? t.updateChecking : t.checkUpdates}
+                          </button>
+                          {updateStatus.status === "ready" && (
+                            <button
+                              onClick={() => electron.installUpdate()}
+                              style={btn("rgba(34,197,94,0.1)", "rgba(34,197,94,0.25)", "#22c55e", { padding: "8px 18px", fontSize: 13 })}
+                            >
+                              {t.installUpdate}
+                            </button>
+                          )}
+                        </div>
+                        {updateStatus.status === "up-to-date" && (
+                          <div style={{ fontSize: 12, color: "#22c55e", marginTop: 8 }}>{t.updateUpToDate}</div>
+                        )}
+                        {updateStatus.status === "available" && (
+                          <div style={{ fontSize: 12, color: "#fbbf24", marginTop: 8 }}>{t.updateAvailable.replace("{v}", updateStatus.version || "")}</div>
+                        )}
+                        {updateStatus.status === "ready" && (
+                          <div style={{ fontSize: 12, color: "#22c55e", marginTop: 8 }}>{t.updateReady.replace("{v}", updateStatus.version || "")}</div>
+                        )}
+                        {updateStatus.status === "error" && (
+                          <div style={{ fontSize: 12, color: "#ef4444", marginTop: 8 }}>{t.updateError}</div>
+                        )}
                       </div>
                     </>
                   )}

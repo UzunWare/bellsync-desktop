@@ -37,6 +37,18 @@ contextBridge.exposeInMainWorld("electronAPI", {
   // ─── Logs ──────────────────────────────────────────────────────────────
   openLogFolder: () => ipcRenderer.invoke("open-log-folder"),
 
+  // ─── Version ──────────────────────────────────────────────────────────
+  getAppVersion: () => ipcRenderer.invoke("get-app-version"),
+
+  // ─── Updates ──────────────────────────────────────────────────────────
+  checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
+  installUpdate: () => ipcRenderer.invoke("install-update"),
+  onUpdateStatus: (callback) => {
+    const handler = (_, data) => callback(data);
+    ipcRenderer.on("update-status", handler);
+    return () => ipcRenderer.removeListener("update-status", handler);
+  },
+
   // ─── Platform Info ───────────────────────────────────────────────────────
   isElectron: true,
 });
