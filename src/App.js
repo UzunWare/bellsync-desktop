@@ -8,6 +8,8 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 
 // ─── Electron API helper ─────────────────────────────────────────────────────
 const electron = window.electronAPI || null;
+const log = (() => { try { return window.electronAPI ? require("electron-log/renderer") : null; } catch { return null; } })();
+const appLog = { info: (...a) => log ? log.info(...a) : console.log(...a), warn: (...a) => log ? log.warn(...a) : console.warn(...a), error: (...a) => log ? log.error(...a) : console.error(...a) };
 
 async function save(key, value) {
   if (electron) await electron.saveSetting(key, value);
@@ -44,6 +46,17 @@ const LL = {
     p7s: "Period 7 Start",
     lunch: "Lunch Break", dismiss: "Dismissal", jumuah: "Jumu'ah Break",
     regular: "Regular Day", halfDay: "Half Day", friday: "Friday",
+    backupRestore: "Backup & Restore",
+    backupDesc: "Export your schedules, sounds, and settings to a file",
+    exportSettings: "Export Settings", importSettings: "Import Settings",
+    exportSuccess: "Settings exported successfully!",
+    importConfirm: "This will replace all your current settings. Continue?",
+    importProfiles: "profiles", importSounds: "custom sounds",
+    importSuccess: "Settings imported! The app will reload.",
+    importError: "Import failed",
+    openLogs: "Open Log Folder",
+    openLogsDesc: "View application logs for troubleshooting",
+    appVersion: "App Version",
   },
   tr: {
     appName: "BellSync", displayMode: "Ekran", adminMode: "Yönetim",
@@ -74,6 +87,17 @@ const LL = {
     p7s: "7. Ders Başlangıcı",
     lunch: "Öğle Arası", dismiss: "Çıkış", jumuah: "Cuma Arası",
     regular: "Normal Gün", halfDay: "Yarım Gün", friday: "Cuma",
+    backupRestore: "Yedekleme ve Geri Yükleme",
+    backupDesc: "Programlarınızı, seslerinizi ve ayarlarınızı bir dosyaya aktarın",
+    exportSettings: "Ayarları Dışa Aktar", importSettings: "Ayarları İçe Aktar",
+    exportSuccess: "Ayarlar başarıyla dışa aktarıldı!",
+    importConfirm: "Bu, mevcut tüm ayarlarınızı değiştirecektir. Devam edilsin mi?",
+    importProfiles: "program", importSounds: "özel ses",
+    importSuccess: "Ayarlar içe aktarıldı! Uygulama yeniden yüklenecek.",
+    importError: "İçe aktarma başarısız",
+    openLogs: "Kayıt Klasörünü Aç",
+    openLogsDesc: "Sorun giderme için uygulama kayıtlarını görüntüle",
+    appVersion: "Uygulama Sürümü",
   },
 };
 
@@ -336,6 +360,7 @@ export default function App() {
     if (silent) return;
     stopRingAudio();
     setRinging(true);
+    appLog.info("Bell ring", { soundId, volume, time: new Date().toLocaleTimeString() });
     if (electron) electron.notifyBellRinging();
     const custom = customSounds.find(s => s.id === soundId);
     const builtin = builtInSounds.find(s => s.id === soundId);
@@ -764,6 +789,44 @@ export default function App() {
                           <input type="checkbox" checked={minToTray} onChange={e => setMinToTray(e.target.checked)} style={{ width: 18, height: 18, accentColor: "#fbbf24" }} />
                           <span style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0" }}>{t.minimizeToTray}</span>
                         </label>
+                      </div>
+
+                      <div style={{ padding: 18, borderRadius: 12, background: "rgba(20,28,40,0.6)", border: "1px solid #1a2333" }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", marginBottom: 6 }}>{t.backupRestore}</div>
+                        <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10 }}>{t.backupDesc}</div>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button onClick={async () => {
+                            const r = await electron.exportSettings();
+                            if (r.success) alert(t.exportSuccess);
+                            else if (!r.canceled) alert(r.error);
+                          }} style={btn("rgba(251,191,36,0.08)", "rgba(251,191,36,0.2)", "#fbbf24", { padding: "8px 18px", fontSize: 13 })}>
+                            {t.exportSettings}
+                          </button>
+                          <button onClick={async () => {
+                            const r = await electron.importSettings();
+                            if (!r.success) { if (!r.canceled) alert(`${t.importError}: ${r.error}`); return; }
+                            const msg = `${t.importConfirm}\n\n${r.profileCount} ${t.importProfiles}, ${r.customSoundCount} ${t.importSounds}`;
+                            if (!window.confirm(msg)) return;
+                            const apply = await electron.applyImportedSettings(r.data);
+                            if (apply.success) { alert(t.importSuccess); window.location.reload(); }
+                            else alert(`${t.importError}: ${apply.error}`);
+                          }} style={btn("rgba(148,163,184,0.06)", "#1e293b", "#94a3b8", { padding: "8px 18px", fontSize: 13 })}>
+                            {t.importSettings}
+                          </button>
+                        </div>
+                      </div>
+
+                      <div style={{ padding: 18, borderRadius: 12, background: "rgba(20,28,40,0.6)", border: "1px solid #1a2333" }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", marginBottom: 6 }}>{t.openLogs}</div>
+                        <div style={{ fontSize: 12, color: "#64748b", marginBottom: 10 }}>{t.openLogsDesc}</div>
+                        <button onClick={() => electron.openLogFolder()} style={btn("rgba(148,163,184,0.06)", "#1e293b", "#94a3b8", { padding: "8px 18px", fontSize: 13 })}>
+                          {t.openLogs}
+                        </button>
+                      </div>
+
+                      <div style={{ padding: 18, borderRadius: 12, background: "rgba(20,28,40,0.6)", border: "1px solid #1a2333" }}>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: "#e2e8f0", marginBottom: 6 }}>{t.appVersion}</div>
+                        <div style={{ fontFamily: "'DM Mono'", fontSize: 13, color: "#fbbf24" }}>v1.0.0</div>
                       </div>
                     </>
                   )}

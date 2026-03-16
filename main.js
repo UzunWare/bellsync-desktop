@@ -1,8 +1,26 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain } = require("electron");
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
+const fs = require("fs");
 const Store = require("electron-store");
 const AutoLaunch = require("auto-launch");
 const { autoUpdater } = require("electron-updater");
+const log = require("electron-log/main");
+
+// ─── Logging ────────────────────────────────────────────────────────────────
+log.initialize();
+log.transports.file.maxSize = 5 * 1024 * 1024; // 5 MB rotation
+log.errorHandler.startCatching({ showDialog: false });
+
+// ─── Crash Recovery: Main Process ────────────────────────────────────────────
+process.on("uncaughtException", (error) => {
+  log.error("FATAL uncaught exception:", error);
+  app.relaunch({ args: process.argv.slice(1).concat(["--relaunch"]) });
+  app.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  log.error("Unhandled promise rejection:", reason);
+});
 
 // ─── Persistent Storage ──────────────────────────────────────────────────────
 const store = new Store({
@@ -22,6 +40,21 @@ const store = new Store({
   },
 });
 
+// ─── Backup Validation ──────────────────────────────────────────────────────
+const BACKUP_VERSION = 1;
+
+function validateBackup(data) {
+  if (!data || typeof data !== "object") return { valid: false, error: "Invalid file format" };
+  if (!data.meta || !data.settings) return { valid: false, error: "Missing meta or settings" };
+  if (typeof data.meta.version !== "number") return { valid: false, error: "Missing backup version" };
+  if (data.meta.version > BACKUP_VERSION) return { valid: false, error: "Backup from newer app version" };
+  const s = data.settings;
+  if (s.profiles !== undefined && !Array.isArray(s.profiles)) return { valid: false, error: "Invalid profiles" };
+  if (s.customSounds !== undefined && !Array.isArray(s.customSounds)) return { valid: false, error: "Invalid custom sounds" };
+  if (s.skipDates !== undefined && !Array.isArray(s.skipDates)) return { valid: false, error: "Invalid skip dates" };
+  return { valid: true };
+}
+
 // ─── Auto Launch ─────────────────────────────────────────────────────────────
 const bellSyncAutoLauncher = new AutoLaunch({
   name: "BellSync",
@@ -29,12 +62,16 @@ const bellSyncAutoLauncher = new AutoLaunch({
 });
 
 async function syncAutoLaunch() {
-  const shouldAutoLaunch = store.get("autoLaunch", true);
-  const isEnabled = await bellSyncAutoLauncher.isEnabled();
-  if (shouldAutoLaunch && !isEnabled) {
-    await bellSyncAutoLauncher.enable();
-  } else if (!shouldAutoLaunch && isEnabled) {
-    await bellSyncAutoLauncher.disable();
+  try {
+    const shouldAutoLaunch = store.get("autoLaunch", true);
+    const isEnabled = await bellSyncAutoLauncher.isEnabled();
+    if (shouldAutoLaunch && !isEnabled) {
+      await bellSyncAutoLauncher.enable();
+    } else if (!shouldAutoLaunch && isEnabled) {
+      await bellSyncAutoLauncher.disable();
+    }
+  } catch (err) {
+    log.error("Auto-launch sync failed:", err);
   }
 }
 
@@ -61,9 +98,6 @@ function createWindow() {
       // CRITICAL: Prevent background throttling so bells ring on time
       backgroundThrottling: false,
     },
-    // Clean frameless look (optional — remove these 2 lines if you want standard title bar)
-    // frame: false,
-    // titleBarStyle: "hidden",
     show: false,
   });
 
@@ -71,7 +105,6 @@ function createWindow() {
   const isDev = !app.isPackaged;
   if (isDev) {
     mainWindow.loadURL("http://localhost:3000");
-    // mainWindow.webContents.openDevTools(); // Uncomment for debugging
   } else {
     mainWindow.loadFile(path.join(__dirname, "build", "index.html"));
   }
@@ -99,19 +132,46 @@ function createWindow() {
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
+
+  // ─── Crash Recovery: Renderer Process ──────────────────────────────────
+  mainWindow.webContents.on("render-process-gone", (event, details) => {
+    log.error("Renderer process gone:", details.reason, "exitCode:", details.exitCode);
+    if (details.reason !== "clean-exit") {
+      setImmediate(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          log.info("Reloading renderer after crash...");
+          mainWindow.reload();
+        } else {
+          log.info("Recreating window after renderer crash...");
+          createWindow();
+        }
+      });
+    }
+  });
+
+  mainWindow.webContents.on("unresponsive", () => {
+    log.warn("Renderer became unresponsive, waiting 5s before recovery...");
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents) {
+        log.info("Renderer still unresponsive, reloading...");
+        mainWindow.reload();
+      }
+    }, 5000);
+  });
+
+  mainWindow.webContents.on("responsive", () => {
+    log.info("Renderer became responsive again");
+  });
 }
 
 // ─── System Tray ─────────────────────────────────────────────────────────────
 function createTray() {
-  // Create a simple 16x16 icon (replace with actual icon in production)
   const iconPath = path.join(__dirname, "build", "icon.png");
 
-  // Fallback: create a simple icon if file doesn't exist
   let trayIcon;
   try {
     trayIcon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
   } catch {
-    // Create a minimal 16x16 icon as fallback
     trayIcon = nativeImage.createEmpty();
   }
 
@@ -165,16 +225,18 @@ function setupIPC() {
   // Save/load settings
   ipcMain.handle("store-get", (_, key) => store.get(key));
   ipcMain.handle("store-set", (_, key, value) => {
-    store.set(key, value);
-    // Sync auto-launch when that setting changes
-    if (key === "autoLaunch") syncAutoLaunch();
+    try {
+      store.set(key, value);
+      if (key === "autoLaunch") syncAutoLaunch();
+    } catch (err) {
+      log.error("Failed to save setting:", key, err);
+    }
   });
   ipcMain.handle("store-get-all", () => store.store);
 
   // Silent mode sync from React → tray
   ipcMain.on("silent-mode-update", (_, silent) => {
     store.set("silentMode", silent);
-    // Update tray context menu without recreating the tray icon
     if (tray) {
       const contextMenu = Menu.buildFromTemplate([
         {
@@ -201,19 +263,108 @@ function setupIPC() {
     }
   });
 
-  // Ring notification (optional: flash taskbar when bell rings)
+  // Ring notification
   ipcMain.on("bell-ringing", () => {
     if (mainWindow && !mainWindow.isFocused()) {
       mainWindow.flashFrame(true);
       setTimeout(() => mainWindow.flashFrame(false), 3000);
     }
   });
+
+  // ─── Log Folder ─────────────────────────────────────────────────────────
+  ipcMain.handle("open-log-folder", () => {
+    const logPath = log.transports.file.getFile().path;
+    shell.openPath(path.dirname(logPath));
+  });
+
+  // ─── Export Settings ────────────────────────────────────────────────────
+  ipcMain.handle("export-settings", async () => {
+    const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
+      title: "Export BellSync Settings",
+      defaultPath: path.join(app.getPath("documents"), `bellsync-backup-${new Date().toISOString().slice(0, 10)}.bellsync`),
+      filters: [{ name: "BellSync Backup", extensions: ["bellsync"] }],
+    });
+    if (canceled || !filePath) return { success: false, canceled: true };
+    try {
+      const allSettings = { ...store.store };
+      delete allSettings.windowBounds;
+      const backup = {
+        meta: { version: BACKUP_VERSION, appVersion: app.getVersion(), exportDate: new Date().toISOString() },
+        settings: allSettings,
+      };
+      await fs.promises.writeFile(filePath, JSON.stringify(backup, null, 2), "utf-8");
+      log.info("Settings exported to:", filePath);
+      return { success: true, filePath };
+    } catch (err) {
+      log.error("Export failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // ─── Import Settings (read + validate, don't apply yet) ────────────────
+  ipcMain.handle("import-settings", async () => {
+    const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, {
+      title: "Import BellSync Settings",
+      filters: [{ name: "BellSync Backup", extensions: ["bellsync"] }],
+      properties: ["openFile"],
+    });
+    if (canceled || filePaths.length === 0) return { success: false, canceled: true };
+    try {
+      const raw = await fs.promises.readFile(filePaths[0], "utf-8");
+      let data;
+      try { data = JSON.parse(raw); } catch { return { success: false, error: "File is not valid JSON" }; }
+      const v = validateBackup(data);
+      if (!v.valid) return { success: false, error: v.error };
+      log.info("Settings file validated:", filePaths[0]);
+      return {
+        success: true,
+        data: data.settings,
+        meta: data.meta,
+        profileCount: (data.settings.profiles || []).length,
+        customSoundCount: (data.settings.customSounds || []).length,
+      };
+    } catch (err) {
+      log.error("Import read failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
+
+  // ─── Apply Imported Settings (after user confirms) ──────────────────────
+  ipcMain.handle("apply-imported-settings", async (_, settings) => {
+    try {
+      // Auto-backup current settings before overwriting
+      const backupDir = path.join(app.getPath("userData"), "backups");
+      await fs.promises.mkdir(backupDir, { recursive: true });
+      const autoBackup = {
+        meta: { version: BACKUP_VERSION, appVersion: app.getVersion(), exportDate: new Date().toISOString(), type: "pre-import" },
+        settings: { ...store.store },
+      };
+      await fs.promises.writeFile(
+        path.join(backupDir, `pre-import-${Date.now()}.bellsync`),
+        JSON.stringify(autoBackup, null, 2), "utf-8"
+      );
+      log.info("Pre-import backup created");
+
+      // Apply imported settings (preserve machine-specific)
+      const windowBounds = store.get("windowBounds");
+      for (const [key, value] of Object.entries(settings)) {
+        if (key !== "windowBounds") store.set(key, value);
+      }
+      store.set("windowBounds", windowBounds);
+      if (settings.autoLaunch !== undefined) syncAutoLaunch();
+      log.info("Imported settings applied successfully");
+      return { success: true };
+    } catch (err) {
+      log.error("Apply imported settings failed:", err);
+      return { success: false, error: err.message };
+    }
+  });
 }
 
 // ─── App Lifecycle ───────────────────────────────────────────────────────────
-// Prevent multiple instances
+const isRelaunch = process.argv.includes("--relaunch");
 const gotTheLock = app.requestSingleInstanceLock();
-if (!gotTheLock) {
+if (!gotTheLock && !isRelaunch) {
   app.quit();
 } else {
   app.on("second-instance", () => {
@@ -225,6 +376,8 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(async () => {
+    log.info("BellSync started", { version: app.getVersion(), electron: process.versions.electron });
+
     createWindow();
     createTray();
     setupIPC();
@@ -234,15 +387,15 @@ if (!gotTheLock) {
     if (app.isPackaged) {
       autoUpdater.autoDownload = true;
       autoUpdater.autoInstallOnAppQuit = true;
+      autoUpdater.on("checking-for-update", () => log.info("Checking for updates..."));
+      autoUpdater.on("update-available", (info) => log.info("Update available:", info.version));
+      autoUpdater.on("update-not-available", () => log.info("No updates available"));
       autoUpdater.on("update-downloaded", () => {
-        // Silently install and restart
+        log.info("Update downloaded, installing and restarting...");
         isQuitting = true;
         autoUpdater.quitAndInstall(true, true);
       });
-      autoUpdater.on("error", (err) => {
-        console.error("Auto-update error:", err);
-      });
-      // Check on launch, then every 4 hours
+      autoUpdater.on("error", (err) => log.error("Auto-update error:", err));
       autoUpdater.checkForUpdates().catch(() => {});
       setInterval(() => autoUpdater.checkForUpdates().catch(() => {}), 4 * 60 * 60 * 1000);
     }
@@ -254,6 +407,7 @@ if (!gotTheLock) {
   });
 
   app.on("before-quit", () => {
+    log.info("BellSync shutting down");
     isQuitting = true;
   });
 

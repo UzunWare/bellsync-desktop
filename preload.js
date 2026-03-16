@@ -29,6 +29,14 @@ contextBridge.exposeInMainWorld("electronAPI", {
     return () => ipcRenderer.removeListener("silent-mode-changed", handler);
   },
 
+  // ─── Backup / Restore ────────────────────────────────────────────────────
+  exportSettings: () => ipcRenderer.invoke("export-settings"),
+  importSettings: () => ipcRenderer.invoke("import-settings"),
+  applyImportedSettings: (settings) => ipcRenderer.invoke("apply-imported-settings", settings),
+
+  // ─── Logs ──────────────────────────────────────────────────────────────
+  openLogFolder: () => ipcRenderer.invoke("open-log-folder"),
+
   // ─── Platform Info ───────────────────────────────────────────────────────
   isElectron: true,
 });
