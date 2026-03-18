@@ -3,7 +3,7 @@ const path = require("path");
 const fs = require("fs");
 const Store = require("electron-store");
 const AutoLaunch = require("auto-launch");
-const { autoUpdater } = require("electron-updater");
+let autoUpdater = null;
 const log = require("electron-log/main");
 
 // ─── Logging ────────────────────────────────────────────────────────────────
@@ -75,6 +75,10 @@ async function syncAutoLaunch() {
   }
 }
 
+// ─── Audio: allow playback without user-gesture gate ─────────────────────────
+app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
+app.commandLine.appendSwitch("disable-features", "AudioServiceOutOfProcess");
+
 // ─── App Variables ───────────────────────────────────────────────────────────
 let mainWindow = null;
 let tray = null;
@@ -112,6 +116,7 @@ function createWindow() {
   // Show when ready
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
+    mainWindow.webContents.setAudioMuted(false);
   });
 
   // Save window size on resize
@@ -276,12 +281,19 @@ function setupIPC() {
 
   // ─── Updates ───────────────────────────────────────────────────────────
   ipcMain.handle("check-for-updates", async () => {
-    if (!app.isPackaged) return { success: false, error: "Updates disabled in dev mode" };
+    if (!app.isPackaged) return { success: false, error: "dev-mode" };
     try {
       await autoUpdater.checkForUpdates();
       return { success: true };
     } catch (err) {
-      return { success: false, error: err.message };
+      const msg = err.message || "";
+      if (msg.includes("404") || msg.includes("No published versions")) {
+        return { success: false, error: "no-releases" };
+      }
+      if (msg.includes("net::") || msg.includes("ENOTFOUND") || msg.includes("ETIMEDOUT")) {
+        return { success: false, error: "network" };
+      }
+      return { success: false, error: msg };
     }
   });
 
@@ -404,6 +416,7 @@ if (!gotTheLock && !isRelaunch) {
     await syncAutoLaunch();
 
     // ─── Auto-Update ──────────────────────────────────────────────────────
+    autoUpdater = require("electron-updater").autoUpdater;
     if (app.isPackaged) {
       autoUpdater.autoDownload = true;
       autoUpdater.autoInstallOnAppQuit = true;
@@ -432,7 +445,11 @@ if (!gotTheLock && !isRelaunch) {
       });
       autoUpdater.on("error", (err) => {
         log.error("Auto-update error:", err);
-        sendUpdateStatus("error", { error: err.message });
+        const msg = err.message || "";
+        let code = msg;
+        if (msg.includes("404") || msg.includes("No published versions")) code = "no-releases";
+        else if (msg.includes("net::") || msg.includes("ENOTFOUND") || msg.includes("ETIMEDOUT")) code = "network";
+        sendUpdateStatus("error", { error: code });
       });
 
       autoUpdater.checkForUpdates().catch(() => {});

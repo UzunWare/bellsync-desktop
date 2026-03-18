@@ -63,6 +63,9 @@ const LL = {
     updateReady: "Update v{v} ready — restart to install",
     updateUpToDate: "You're up to date!",
     updateError: "Update check failed",
+    updateErrorDev: "Updates only work in the installed version",
+    updateErrorNoReleases: "No updates published yet",
+    updateErrorNetwork: "Could not reach update server — check your connection",
     installUpdate: "Restart & Update",
   },
   tr: {
@@ -111,6 +114,9 @@ const LL = {
     updateReady: "v{v} güncelleme hazır — yüklemek için yeniden başlat",
     updateUpToDate: "Güncelsiniz!",
     updateError: "Güncelleme kontrolü başarısız",
+    updateErrorDev: "Güncellemeler yalnızca kurulu sürümde çalışır",
+    updateErrorNoReleases: "Henüz güncelleme yayınlanmadı",
+    updateErrorNetwork: "Güncelleme sunucusuna ulaşılamadı — bağlantınızı kontrol edin",
     installUpdate: "Yeniden Başlat ve Güncelle",
   },
 };
@@ -170,6 +176,7 @@ const builtInSounds = [
 // ─── Audio ───────────────────────────────────────────────────────────────────
 function playBuiltinSound(type, vol = 0.8, dur = 3) {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  if (ctx.state === "suspended") ctx.resume();
   const g = ctx.createGain(); g.gain.value = vol; g.connect(ctx.destination);
   const osc = (freq, t, wave, atk, dec, gn = 0.3) => {
     const o = ctx.createOscillator(); const gNode = ctx.createGain();
@@ -219,6 +226,7 @@ const ic = {
   plus: <Ico d={<><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></>} sw={2.5} size={16}/>,
   trash: <Ico d={<><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></>} size={15}/>,
   play: <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>,
+  stop: <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>,
   check: <Ico d={<polyline points="20 6 9 17 4 12"/>} size={14} sw={3}/>,
   copy: <Ico d={<><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></>} size={15}/>,
   upload: <Ico d={<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></>}/>,
@@ -247,7 +255,9 @@ const CSS = `
 .fade-up{animation:fadeUp .4s ease-out both}
 .tick{animation:countTick 1s ease-in-out infinite}
 input[type="time"],input[type="text"],input[type="date"]{background:#141c28;border:1px solid #2a3444;color:#e2e8f0;padding:8px 12px;border-radius:8px;font-family:'DM Sans',sans-serif;font-size:14px;outline:none;transition:border .2s}
-input[type="time"]::-webkit-datetime-edit-ampm-field{color:#fbbf24;font-weight:700;font-size:14px;padding:2px 4px;background:rgba(251,191,36,0.1);border-radius:4px}
+input[type="time"]::-webkit-datetime-edit-ampm-field{display:none}
+input[type="time"]::-webkit-datetime-edit{padding:0;margin:0}
+input[type="time"]::-webkit-datetime-edit-fields-wrapper{padding:0}
 input[type="time"]::-webkit-calendar-picker-indicator{filter:invert(0.7)}
 input[type="date"]::-webkit-calendar-picker-indicator{filter:invert(0.7)}
 input:focus{border-color:#fbbf24}
@@ -278,10 +288,13 @@ export default function App() {
   const [skipDates, setSkipDates] = useState([]);
   const [appVersion, setAppVersion] = useState("1.0.0");
   const [updateStatus, setUpdateStatus] = useState({ status: "idle" });
+  const [previewingId, setPreviewingId] = useState(null);
+  const previewTimerRef = useRef(null);
+  const sortTimerRef = useRef(null);
   const fileRef = useRef(null);
   const previewRef = useRef(null);
   const ringAudioRef = useRef(null);
-  const stopPreview = () => { if (previewRef.current) { try { if (previewRef.current.close) previewRef.current.close(); else previewRef.current.pause(); } catch {} previewRef.current = null; } };
+  const stopPreview = () => { if (previewTimerRef.current) { clearTimeout(previewTimerRef.current); previewTimerRef.current = null; } setPreviewingId(null); if (previewRef.current) { try { if (previewRef.current.close) { if (previewRef.current.state !== "closed") previewRef.current.close(); } else { previewRef.current.pause(); } } catch {} previewRef.current = null; } };
   const stopRingAudio = () => { if (ringAudioRef.current) { try { if (ringAudioRef.current.close) { if (ringAudioRef.current.state !== "closed") ringAudioRef.current.close(); } else { ringAudioRef.current.pause(); ringAudioRef.current.currentTime = 0; } } catch {} ringAudioRef.current = null; } };
   const t = LL[lang];
 
@@ -437,7 +450,7 @@ export default function App() {
   }, [newProfileId, profiles]);
   const dupProfile = pid => {
     const src = profiles.find(p => p.id === pid); if (!src) return;
-    setProfiles(p => [...p, { ...src, id: `p-${uid()}`, days: [], customName: { en: (src.customName?.en || t[src.nameKey])+" (Copy)", tr: (src.customName?.tr || LL.tr[src.nameKey])+" (Kopya)" }, bells: src.bells.map(b => ({...b, id: uid()})) }]);
+    setProfiles(p => [...p, { ...src, id: `p-${uid()}`, days: [...(src.days || [])], customName: { en: (src.customName?.en || t[src.nameKey])+" (Copy)", tr: (src.customName?.tr || LL.tr[src.nameKey])+" (Kopya)" }, bells: src.bells.map(b => ({...b, id: uid()})) }]);
   };
   const delProfile = pid => {
     if (profiles.length <= 1) return;
@@ -464,8 +477,11 @@ export default function App() {
   const updProfileName = (pid, val) => {
     setProfiles(p => p.map(x => x.id === pid ? {...x, customName: {...(x.customName||{}), [lang]: val}} : x));
   };
+  const sortBells = pid => {
+    setProfiles(prev => prev.map(x => x.id === pid ? {...x, bells: [...x.bells].sort((a,b) => toMin(a.time)-toMin(b.time))} : x));
+  };
   const addBell = pid => {
-    setProfiles(p => p.map(x => x.id === pid ? {...x, bells: [...x.bells, {id: uid(), time: "12:00", labelKey: null, customLabel: {en:"New Bell",tr:"Yeni Zil"}}]} : x));
+    setProfiles(p => p.map(x => x.id === pid ? {...x, bells: [...x.bells, {id: uid(), time: "12:00", labelKey: null, customLabel: {en:"New Bell",tr:"Yeni Zil"}}].sort((a,b) => toMin(a.time)-toMin(b.time))} : x));
   };
   const delBell = (pid, bid) => {
     setProfiles(p => p.map(x => x.id === pid ? {...x, bells: x.bells.filter(b => b.id !== bid)} : x));
@@ -593,6 +609,7 @@ export default function App() {
                 </div>
               </div>
             )}
+
           </div>
         </div>
       )}
@@ -636,18 +653,20 @@ export default function App() {
                   </div>
                   {profiles.map(p => {
                     const isToday = (p.days || []).includes(todayDay);
-                    const isAct = isToday || (!todayProfile && activeId === p.id);
-                    const pBells = [...p.bells].sort((a,b) => toMin(a.time)-toMin(b.time));
+                    const isDefault = activeId === p.id;
+                    const isAct = isToday || (!todayProfile && isDefault);
+                    const highlighted = isAct || isDefault;
+                    const pBells = p.bells;
                     const dayIndices = [1,2,3,4,5,6,0]; // Mon-Sun
                     return (
-                      <div key={p.id} id={`profile-${p.id}`} style={{ borderRadius: 14, overflow: "hidden", background: "rgba(20,28,40,0.6)", border: isAct ? "1px solid rgba(251,191,36,0.2)" : "1px solid #1a2333", animation: newProfileId === p.id ? "highlightNew 1.5s ease-out" : undefined }}>
-                        <div style={{ padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", background: isAct ? "rgba(251,191,36,0.04)" : "transparent", borderBottom: "1px solid #1a2333" }}>
+                      <div key={p.id} id={`profile-${p.id}`} style={{ borderRadius: 14, overflow: "hidden", background: "rgba(20,28,40,0.6)", border: highlighted ? "1px solid rgba(251,191,36,0.2)" : "1px solid #1a2333", animation: newProfileId === p.id ? "highlightNew 1.5s ease-out" : undefined }}>
+                        <div style={{ padding: "14px 18px", display: "flex", alignItems: "center", justifyContent: "space-between", background: highlighted ? "rgba(251,191,36,0.04)" : "transparent", borderBottom: "1px solid #1a2333" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                             <input type="text" value={p.customName?.[lang] ?? t[p.nameKey] ?? ""} onChange={e => updProfileName(p.id, e.target.value)} style={{ fontSize: 15, fontWeight: 600, background: "transparent", border: "1px solid transparent", color: "#f8fafc", padding: "4px 8px", borderRadius: 6 }} onFocus={e => e.target.style.borderColor = "#2a3444"} onBlur={e => e.target.style.borderColor = "transparent"} />
-                            {isAct && <span style={{ padding: "2px 10px", borderRadius: 20, fontSize: 10, fontWeight: 700, background: "rgba(251,191,36,0.12)", color: "#fbbf24", textTransform: "uppercase" }}>{t.activeProfile}</span>}
+                            {(isAct || isDefault) && <span style={{ padding: "2px 10px", borderRadius: 20, fontSize: 10, fontWeight: 700, background: "rgba(251,191,36,0.12)", color: "#fbbf24", textTransform: "uppercase" }}>{t.activeProfile}</span>}
                           </div>
                           <div style={{ display: "flex", gap: 6 }}>
-                            {!isAct && <button onClick={() => setActiveId(p.id)} style={btn("rgba(251,191,36,0.08)", "rgba(251,191,36,0.15)", "#fbbf24", { padding: "5px 12px" })}>{t.setActive}</button>}
+                            {!isDefault && <button onClick={() => setActiveId(p.id)} style={btn("rgba(251,191,36,0.08)", "rgba(251,191,36,0.15)", "#fbbf24", { padding: "5px 12px" })}>{t.setActive}</button>}
                             <button onClick={() => dupProfile(p.id)} style={btn("rgba(148,163,184,0.06)", "#1e293b", "#64748b", { padding: "5px 10px" })}>{ic.copy} {t.duplicate}</button>
                             {profiles.length > 1 && <button onClick={() => delProfile(p.id)} style={btn("rgba(239,68,68,0.06)", "rgba(239,68,68,0.12)", "#ef4444", { padding: "5px 10px" })}>{ic.trash} {t.delete}</button>}
                           </div>
@@ -672,7 +691,15 @@ export default function App() {
                             const isDupe = pBells.filter(x => x.time === b.time).length > 1;
                             return (
                             <div key={b.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid rgba(26,35,51,0.8)" }}>
-                              <input type="time" value={b.time} onChange={e => updBell(p.id, b.id, "time", e.target.value)} style={{ width: 140, fontFamily: "'DM Mono'", fontSize: 15, borderColor: isDupe ? "#ef4444" : undefined }} />
+                              <input type="time" value={b.time} onFocus={() => { if (sortTimerRef.current) { clearTimeout(sortTimerRef.current); sortTimerRef.current = null; } }} onBlur={() => { const pid = p.id; sortTimerRef.current = setTimeout(() => { sortBells(pid); sortTimerRef.current = null; }, 250); }} onChange={e => { if (e.target.value) updBell(p.id, b.id, "time", e.target.value); }} style={{ width: 120, fontFamily: "'DM Mono'", fontSize: 15, borderColor: isDupe ? "#ef4444" : undefined }} />
+                              <button onClick={() => {
+                                const [h, m] = (b.time || "08:00").split(":").map(Number);
+                                const newH = h < 12 ? h + 12 : h - 12;
+                                updBell(p.id, b.id, "time", `${pad(newH)}:${pad(m)}`);
+                                sortBells(p.id);
+                              }} style={{ padding: "5px 10px", borderRadius: 6, fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono'", cursor: "pointer", minWidth: 42, textAlign: "center", background: (parseInt((b.time || "08:00").split(":")[0]) >= 12) ? "rgba(251,191,36,0.12)" : "rgba(96,165,250,0.12)", border: (parseInt((b.time || "08:00").split(":")[0]) >= 12) ? "1px solid rgba(251,191,36,0.25)" : "1px solid rgba(96,165,250,0.25)", color: (parseInt((b.time || "08:00").split(":")[0]) >= 12) ? "#fbbf24" : "#60a5fa" }}>
+                                {parseInt((b.time || "08:00").split(":")[0]) >= 12 ? "PM" : "AM"}
+                              </button>
                               <input type="text" value={b.customLabel?.[lang] ?? t[b.labelKey] ?? ""} onChange={e => updBell(p.id, b.id, "label", e.target.value)} style={{ flex: 1 }} />
                               <button onClick={() => delBell(p.id, b.id)} style={{ padding: "5px 7px", borderRadius: 5, background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.1)", color: "#ef4444", cursor: "pointer", display: "flex", alignItems: "center" }}>{ic.trash}</button>
                             </div>
@@ -694,12 +721,12 @@ export default function App() {
                     {builtInSounds.map(s => {
                       const act = soundId === s.id;
                       return (
-                        <div key={s.id} style={{ padding: 14, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "space-between", background: act ? "rgba(251,191,36,0.06)" : "rgba(20,28,40,0.6)", border: act ? "1px solid rgba(251,191,36,0.2)" : "1px solid #1a2333" }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                            <button onClick={() => { stopPreview(); if (s.file) { const base = (typeof process !== 'undefined' && process.env?.PUBLIC_URL) || '.'; const a = new Audio(`${base}/${s.file}`); a.volume = volume/100; a.play().catch(()=>{}); previewRef.current = a; } else { previewRef.current = playBuiltinSound(s.id, volume/100, 2); } }} style={{ width: 32, height: 32, borderRadius: 6, background: "rgba(148,163,184,0.06)", border: "1px solid #1e293b", color: "#94a3b8", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{ic.play}</button>
-                            <span style={{ fontSize: 13, fontWeight: 500, color: "#e2e8f0" }}>{lang === "en" ? s.nameEn : s.nameTr}</span>
+                        <div key={s.id} style={{ padding: 14, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: act ? "rgba(251,191,36,0.06)" : "rgba(20,28,40,0.6)", border: act ? "1px solid rgba(251,191,36,0.2)" : "1px solid #1a2333" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
+                            <button onClick={() => { if (previewingId === s.id) { stopPreview(); return; } stopPreview(); const dur = s.file ? 5 : 2; setPreviewingId(s.id); previewTimerRef.current = setTimeout(() => { setPreviewingId(null); previewTimerRef.current = null; }, dur * 1000); if (s.file) { const base = (typeof process !== 'undefined' && process.env?.PUBLIC_URL) || '.'; const a = new Audio(`${base}/${s.file}`); a.volume = volume/100; a.play().catch(()=>{}); a.onended = () => { setPreviewingId(null); previewRef.current = null; }; previewRef.current = a; } else { previewRef.current = playBuiltinSound(s.id, volume/100, dur); } }} style={{ width: 32, height: 32, borderRadius: 6, background: previewingId === s.id ? "rgba(251,191,36,0.15)" : "rgba(148,163,184,0.06)", border: previewingId === s.id ? "1px solid rgba(251,191,36,0.3)" : "1px solid #1e293b", color: previewingId === s.id ? "#fbbf24" : "#94a3b8", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all .15s" }}>{previewingId === s.id ? ic.stop : ic.play}</button>
+                            <span style={{ fontSize: 13, fontWeight: 500, color: "#e2e8f0", wordBreak: "break-word" }}>{lang === "en" ? s.nameEn : s.nameTr}</span>
                           </div>
-                          <button onClick={() => setSoundId(s.id)} style={btn(act ? "rgba(251,191,36,0.15)" : "rgba(148,163,184,0.06)", act ? "rgba(251,191,36,0.25)" : "#1e293b", act ? "#fbbf24" : "#64748b", { padding: "4px 12px", fontSize: 11 })}>{act ? t.selected : t.select}</button>
+                          <button onClick={() => setSoundId(s.id)} style={btn(act ? "rgba(251,191,36,0.15)" : "rgba(148,163,184,0.06)", act ? "rgba(251,191,36,0.25)" : "#1e293b", act ? "#fbbf24" : "#64748b", { padding: "4px 12px", fontSize: 11, flexShrink: 0 })}>{act ? t.selected : t.select}</button>
                         </div>
                       );
                     })}
@@ -709,12 +736,12 @@ export default function App() {
                       {customSounds.map(s => {
                         const act = soundId === s.id;
                         return (
-                          <div key={s.id} style={{ padding: 14, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "space-between", background: act ? "rgba(251,191,36,0.06)" : "rgba(20,28,40,0.6)", border: act ? "1px solid rgba(251,191,36,0.2)" : "1px solid #1a2333" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                              <button onClick={() => { stopPreview(); const a = new Audio(s.url); a.volume = volume/100; a.play(); previewRef.current = a; }} style={{ width: 32, height: 32, borderRadius: 6, background: "rgba(148,163,184,0.06)", border: "1px solid #1e293b", color: "#94a3b8", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center" }}>{ic.play}</button>
-                              <span style={{ fontSize: 13, fontWeight: 500, color: "#e2e8f0" }}>{s.name}</span>
+                          <div key={s.id} style={{ padding: 14, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, background: act ? "rgba(251,191,36,0.06)" : "rgba(20,28,40,0.6)", border: act ? "1px solid rgba(251,191,36,0.2)" : "1px solid #1a2333" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, minWidth: 0 }}>
+                              <button onClick={() => { if (previewingId === s.id) { stopPreview(); return; } stopPreview(); setPreviewingId(s.id); const a = new Audio(s.url); a.volume = volume/100; a.play().catch(()=>{}); a.onended = () => { setPreviewingId(null); previewRef.current = null; }; previewRef.current = a; }} style={{ width: 32, height: 32, borderRadius: 6, background: previewingId === s.id ? "rgba(251,191,36,0.15)" : "rgba(148,163,184,0.06)", border: previewingId === s.id ? "1px solid rgba(251,191,36,0.3)" : "1px solid #1e293b", color: previewingId === s.id ? "#fbbf24" : "#94a3b8", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, transition: "all .15s" }}>{previewingId === s.id ? ic.stop : ic.play}</button>
+                              <span style={{ fontSize: 13, fontWeight: 500, color: "#e2e8f0", wordBreak: "break-word" }}>{s.name}</span>
                             </div>
-                            <div style={{ display: "flex", gap: 4 }}>
+                            <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
                               <button onClick={() => setSoundId(s.id)} style={btn(act ? "rgba(251,191,36,0.15)" : "rgba(148,163,184,0.06)", act ? "rgba(251,191,36,0.25)" : "#1e293b", act ? "#fbbf24" : "#64748b", { padding: "4px 12px", fontSize: 11 })}>{act ? t.selected : t.select}</button>
                               <button onClick={() => { if (soundId === s.id) setSoundId("classic"); setCustomSounds(p => p.filter(x => x.id !== s.id)); }} style={{ padding: "4px 6px", borderRadius: 5, background: "rgba(239,68,68,0.06)", border: "1px solid rgba(239,68,68,0.1)", color: "#ef4444", cursor: "pointer" }}>{ic.trash}</button>
                             </div>
@@ -882,7 +909,12 @@ export default function App() {
                           <div style={{ fontSize: 12, color: "#22c55e", marginTop: 8 }}>{t.updateReady.replace("{v}", updateStatus.version || "")}</div>
                         )}
                         {updateStatus.status === "error" && (
-                          <div style={{ fontSize: 12, color: "#ef4444", marginTop: 8 }}>{t.updateError}</div>
+                          <div style={{ fontSize: 12, color: "#ef4444", marginTop: 8 }}>
+                            {updateStatus.error === "dev-mode" ? t.updateErrorDev
+                              : updateStatus.error === "no-releases" ? t.updateErrorNoReleases
+                              : updateStatus.error === "network" ? t.updateErrorNetwork
+                              : t.updateError}
+                          </div>
                         )}
                       </div>
                     </>
@@ -893,6 +925,9 @@ export default function App() {
           </div>
         </div>
       )}
+      <div style={{ position: "fixed", bottom: 0, left: 0, right: 0, padding: "10px 24px", fontSize: 12, color: "#475569", textAlign: "center", fontFamily: "'DM Sans',sans-serif", letterSpacing: "0.5px", pointerEvents: "none" }}>
+        BellSync by Emre Korkmaz
+      </div>
     </div>
   );
 }
