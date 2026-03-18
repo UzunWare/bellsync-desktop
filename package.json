@@ -1,6 +1,6 @@
 {
   "name": "bellsync",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Academy Bell Management System",
   "main": "main.js",
   "scripts": {
